@@ -1,0 +1,11 @@
+{
+  "default_registry": "ghcr",
+  "registries": {
+    "company": {
+      "name": "公司内部镜像站",
+      "host": "mirror.example.com",
+      "description": "内网私有镜像仓库，仅主机名，不要带路径"
+    },
+    "quay-io": "quay.io"
+  }
+}

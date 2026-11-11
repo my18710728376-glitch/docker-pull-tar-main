@@ -1,0 +1,35 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---------- 运行时产物 ----------
+downloads/*
+!downloads/.gitkeep
+*.tar
+*.log
+
+# ---------- 本地配置（可能包含内网地址，不入库） ----------
+.env
+registry_config.json
+
+# ---------- 编辑器与操作系统 ----------
+.idea/
+.vscode/
+.screenshots/
+.DS_Store
+Thumbs.db
+*.swp
+
+# ---------- 构建与临时文件 ----------
+build/
+dist/
+*.spec
+*.zip
