@@ -8,12 +8,12 @@ import time
 import math  # 新增 math 库用于计算页数
 import urllib.request
 import warnings
+from html import escape as html_escape
 
-warnings.filterwarnings("ignore", message="urllib3.*doesn\\'t match a supported version")
+warnings.filterwarnings("ignore", message="urllib3.*doesn't match a supported version")
 warnings.filterwarnings("ignore", category=UserWarning, module="requests")
 
 import requests
-from urllib.request import getproxies
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import tarfile
@@ -65,11 +65,8 @@ MANIFEST_ACCEPT = (
     "application/vnd.oci.image.manifest.v1+json"
 )
 
-# 防止回环代理问题
-local_proxies = getproxies()
-os.environ["HTTP_PROXY"] = os.environ["http_proxy"] = local_proxies.get("http", "")
-os.environ["HTTPS_PROXY"] = os.environ["https_proxy"] = local_proxies.get("https", "")
-os.environ["NO_PROXY"] = os.environ["no_proxy"] = "localhost, 127.0.0.1/8, ::1"
+# 代理只作用在本次请求的 Session 上，不在导入期改写进程环境变量，
+# 避免影响同进程中的其它组件（例如同机运行的其他服务）
 
 
 # --------------------------
@@ -79,7 +76,6 @@ os.environ["NO_PROXY"] = os.environ["no_proxy"] = "localhost, 127.0.0.1/8, ::1"
 class DownloadStats:
     total_size: int = 0
     downloaded_size: int = 0
-    start_time: float = 0.0
     speeds: List[float] = field(default_factory=list)
 
     def get_avg_speed(self) -> float:
@@ -143,7 +139,7 @@ class WebProgressDisplay:
             if self.error_msg:
                 return f"""
                 <div style="padding: 15px; border-radius: 8px; background-color: #ffebee; color: #c62828; font-weight: bold; border: 1px solid #ef5350;">
-                    ❌ 发生错误: {self.error_msg}
+                    ❌ 发生错误: {html_escape(self.error_msg)}
                 </div>
                 """
 
@@ -154,7 +150,7 @@ class WebProgressDisplay:
 
             if self.target_reference:
                 html.append(f"""
-                <div style="margin-bottom: 15px; color: #b0bec5;">🎯 目标镜像: {self.target_reference}</div>
+                <div style="margin-bottom: 15px; color: #b0bec5;">🎯 目标镜像: {html_escape(self.target_reference)}</div>
                 """)
 
             for _, layer in sorted(self.layers.items(), key=lambda x: x[1].index):
@@ -219,33 +215,39 @@ class WebProgressDisplay:
 # 核心网络与下载逻辑
 # --------------------------
 def apply_proxy_config(proxy_mode, p_host, p_user, p_pass):
+    """按界面选择生成代理字典，不改写进程级环境变量。
+
+    "系统代理" 读取操作系统代理设置；"自定义代理" 使用界面填写的地址；
+    "无代理" 返回空字典。
+    """
     proxies = {}
     if proxy_mode == "系统代理":
         sys_proxies = urllib.request.getproxies()
         if "http" in sys_proxies:
-            os.environ["HTTP_PROXY"] = os.environ["http_proxy"] = sys_proxies["http"]
             proxies["http"] = sys_proxies["http"]
         if "https" in sys_proxies:
-            os.environ["HTTPS_PROXY"] = os.environ["https_proxy"] = sys_proxies["https"]
             proxies["https"] = sys_proxies["https"]
     elif proxy_mode == "自定义代理":
         auth = f"{p_user}:{p_pass}@" if p_user else ""
         url = f"http://{auth}{p_host}" if p_host else ""
         if url:
-            os.environ["HTTP_PROXY"] = os.environ["http_proxy"] = url
-            os.environ["HTTPS_PROXY"] = os.environ["https_proxy"] = url
             proxies = {"http": url, "https": url}
     return proxies
 
 
-def get_session(verify_ssl, proxies) -> requests.Session:
+def get_session(verify_ssl, proxies, trust_env=False) -> requests.Session:
+    """创建带重试与连接池的 Session。
+
+    trust_env 为 False 时不读取进程环境变量中的代理，确保界面选择生效。
+    """
     session = requests.Session()
-    retry = Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
+    retry = Retry(total=3, backoff_factor=BACKOFF_BASE, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry, pool_connections=64, pool_maxsize=128)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.verify = verify_ssl
     session.proxies = proxies
+    session.trust_env = trust_env
     return session
 
 
@@ -271,18 +273,27 @@ def get_auth_head(session, registry, repository):
 
 
 def download_file_chunked(session, url, headers, save_path, desc, expected_digest, progress: WebProgressDisplay):
-    resume_pos = os.path.getsize(save_path) if os.path.exists(save_path) else 0
-    fetch_headers = headers.copy()
-    if resume_pos > 0: fetch_headers["Range"] = f"bytes={resume_pos}-"
+    """下载单个 blob，支持断点续传。
 
+    每次重试都会重新读取已落盘大小并重新构造 Range 头：
+    若沿用旧偏移追加写入，会让同一段数据重复写进文件导致层损坏。
+    服务端忽略 Range 返回 200 全量内容时从零覆盖写入。
+    """
     for attempt in range(DOWNLOAD_MAX_RETRIES):
         if progress.error_msg: return False
+        resume_pos = os.path.getsize(save_path) if os.path.exists(save_path) else 0
+        fetch_headers = headers.copy()
+        if resume_pos > 0:
+            fetch_headers["Range"] = f"bytes={resume_pos}-"
         try:
             with session.get(url, headers=fetch_headers, stream=True, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)) as resp:
                 if resp.status_code == 416:
                     progress.complete_layer(desc)
                     return True
                 resp.raise_for_status()
+
+                if resume_pos > 0 and resp.status_code != 206:
+                    resume_pos = 0
 
                 content_range = resp.headers.get("content-range")
                 total_size = int(content_range.split("/")[1]) if content_range else int(
@@ -313,18 +324,31 @@ def download_file_chunked(session, url, headers, save_path, desc, expected_diges
             return True
         except Exception as e:
             if attempt < DOWNLOAD_MAX_RETRIES - 1:
-                time.sleep(1)
+                time.sleep(BACKOFF_BASE * (2 ** attempt))
                 continue
             raise e
     return False
 
 
+def _split_arch(arch):
+    """拆分界面架构选项为 ``(architecture, variant)``。
+
+    界面使用 ``arm/v7`` 这种写法，而 manifest 中对应
+    ``architecture="arm"`` + ``variant="v7"`` 两个字段。
+    """
+    base, _, variant = str(arch or "").partition("/")
+    return base, (variant or None)
+
+
 def pull_image_logic(progress: WebProgressDisplay, registry, repository, tag, arch, output_dir, proxy_args):
     try:
         proxies = apply_proxy_config(*proxy_args[:4])
-        session = get_session(proxy_args[4], proxies)
+        session = get_session(proxy_args[4], proxies, trust_env=(proxy_args[0] == "系统代理"))
 
-        if "/" not in repository: repository = f"library/{repository}"
+        # 只有 Docker Hub 才使用 library/ 命名空间；registry.k8s.io 等仓库的
+        # 单段仓库名（如 pause）本身合法，补全 library/ 会导致 404
+        if "/" not in repository and registry.lower() in DOCKER_HUB_HOSTS:
+            repository = f"library/{repository}"
         progress.target_reference = f"{registry}/{repository}:{tag}"
 
         # 拉取前先验证目标仓库连通性，连接异常时直接给出明确提示
@@ -333,23 +357,30 @@ def pull_image_logic(progress: WebProgressDisplay, registry, repository, tag, ar
         auth_head = get_auth_head(session, registry, repository)
 
         mani_url = f"https://{registry}/v2/{repository}/manifests/{tag}"
-        resp = session.get(mani_url, headers=auth_head)
+        resp = session.get(mani_url, headers=auth_head, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
         resp.raise_for_status()
         resp_json = resp.json()
 
         if resp_json.get("manifests"):
+            want_arch, want_variant = _split_arch(arch)
             digest = None
             for m in resp_json["manifests"]:
-                m_arch = m.get("platform", {}).get("architecture")
-                m_os = m.get("platform", {}).get("os")
-                if m_arch == arch and m_os == "linux":
-                    digest = m.get("digest")
-                    break
+                platform = m.get("platform") or {}
+                m_arch = platform.get("architecture")
+                m_variant = platform.get("variant")
+                m_os = platform.get("os")
+                if m_arch != want_arch or m_os != "linux":
+                    continue
+                # arm 需要同时匹配 variant（arm/v7 在清单中写作 architecture=arm + variant=v7）
+                if want_variant and m_variant and m_variant != want_variant:
+                    continue
+                digest = m.get("digest")
+                break
             if not digest:
                 raise ValueError(f"该镜像在 {tag} 下未找到 {arch} 架构。")
 
             mani_url = f"https://{registry}/v2/{repository}/manifests/{digest}"
-            resp = session.get(mani_url, headers=auth_head)
+            resp = session.get(mani_url, headers=auth_head, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
             resp.raise_for_status()
             resp_json = resp.json()
 
@@ -358,7 +389,9 @@ def pull_image_logic(progress: WebProgressDisplay, registry, repository, tag, ar
         config_size = resp_json["config"].get("size", 0)
 
         safe_repo = repository.replace("/", "_")
-        target_dir = Path(output_dir) / f"{safe_repo}_{tag}_{arch}"
+        # arm/v7 这类架构名带斜杠，直接拼进路径会生成不存在的子目录
+        safe_arch = str(arch).replace("/", "-")
+        target_dir = Path(output_dir) / f"{safe_repo}_{tag}_{safe_arch}"
         imgdir = target_dir / "layers"
         imgdir.mkdir(parents=True, exist_ok=True)
 
@@ -424,9 +457,12 @@ def pull_image_logic(progress: WebProgressDisplay, registry, repository, tag, ar
         with open(imgdir / "repositories", "w") as f:
             json.dump({repository: {tag: layers[-1]["fake_layerid"]}}, f)
 
-        tar_final = Path(output_dir) / f"{safe_repo}_{tag}_{arch}.tar"
-        with tarfile.open(str(tar_final), "w") as tar:
+        tar_final = Path(output_dir) / f"{safe_repo}_{tag}_{safe_arch}.tar"
+        # 先写入 .part 再原子改名，避免打包中断时留下半成品 tar 被用户误 load
+        tar_tmp = tar_final.with_suffix(".tar.part")
+        with tarfile.open(str(tar_tmp), "w") as tar:
             tar.add(str(imgdir), arcname="/")
+        os.replace(str(tar_tmp), str(tar_final))
 
         shutil.rmtree(str(imgdir), ignore_errors=True)
 
@@ -782,7 +818,7 @@ def execute_search(keyword, target_page, p_mode, p_host, p_user, p_pass, vSSL, o
             interactive=False)
 
     proxies = apply_proxy_config(p_mode, p_host, p_user, p_pass)
-    session = get_session(vSSL, proxies)
+    session = get_session(vSSL, proxies, trust_env=(p_mode == "系统代理"))
 
     official_keys = normalize_group_keys(official_keys)
     if official_keys:
@@ -803,13 +839,16 @@ def execute_search(keyword, target_page, p_mode, p_host, p_user, p_pass, vSSL, o
         res, total = [], 0
         target_page = 1
 
+    # 分页页数以在线索引的可取页数为准：本地内置结果与精确匹配只并入第 1 页，
+    # 若按含本地条数的总数计算页数，末页会向在线接口取到空数据
+    online_total = total
     added = 0
     if target_page == 1:
         res, total, added = _merge_local_index(keyword, res, total)
         # 精确全匹配：完整仓库名优先置顶，其余结果保持不变
         res, total = _prepend_exact_result(keyword, session, res, total)
 
-    total_pages = max(1, math.ceil(total / DEFAULT_PAGE_SIZE))
+    total_pages = max(1, math.ceil(online_total / DEFAULT_PAGE_SIZE))
     actual_page = min(max(1, target_page), total_pages)
 
     note = ""
@@ -829,7 +868,7 @@ def execute_search(keyword, target_page, p_mode, p_host, p_user, p_pass, vSSL, o
 
 def fn_get_tags(selected_repo, p_mode, p_host, p_user, p_pass, vSSL):
     proxies = apply_proxy_config(p_mode, p_host, p_user, p_pass)
-    session = get_session(vSSL, proxies)
+    session = get_session(vSSL, proxies, trust_env=(p_mode == "系统代理"))
 
     # 镜像自带仓库前缀时（如 ghcr.io/kite-org/kite）直接从该仓库读取标签
     try:

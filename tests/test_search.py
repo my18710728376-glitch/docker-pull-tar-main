@@ -41,7 +41,7 @@ def make_session(search_items=None, hub_item=None, ghcr_tags=None):
 
 
 def install_session(monkeypatch, session):
-    monkeypatch.setattr(app, "get_session", lambda verify_ssl, proxies: session)
+    monkeypatch.setattr(app, "get_session", lambda verify_ssl, proxies, **kwargs: session)
 
 
 def search(keyword, page=1, official_keys=None):

@@ -14,6 +14,7 @@ htmlcov/
 downloads/*
 !downloads/.gitkeep
 *.tar
+*.tar.part
 *.log
 
 # ---------- 本地配置（可能包含内网地址，不入库） ----------

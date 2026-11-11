@@ -1,8 +1,5 @@
-certifi==2025.1.31
-charset-normalizer==3.4.1
-idna==3.10
-requests==2.32.3
-urllib3==2.3.0
+# 运行依赖（Web 服务）；测试依赖见 requirements-dev.txt
+# requests < 2.32.4 与 urllib3 < 2.5.0 存在已公开漏洞，故设置下限
+requests>=2.32.4
+urllib3>=2.5.0
 gradio>=6.14.0
-# 测试依赖
-pytest>=8.0.0

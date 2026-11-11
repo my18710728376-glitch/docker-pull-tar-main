@@ -9,7 +9,7 @@
 
 > **项目来源**：本项目来源于 GitHub 开源项目 [topcss/docker-pull-tar](https://github.com/topcss/docker-pull-tar)，是在其基础上完成二次优化的衍生版本，与上游项目无隶属关系。原项目采用 MIT 许可证。
 
-**当前版本**：`v2.1.0-Gradio7-Web`
+**当前版本**：`v2.1.0-Gradio7-Web`（版本号为项目自命名，实际运行在 Gradio 6.x 上）
 
 ---
 
@@ -100,20 +100,20 @@ Docker 镜像离线拉取器面向**内网、离线或无法直连镜像仓库**
 - **多镜像仓库**：内置 Docker Hub、GHCR、Quay、registry.k8s.io、k8s.gcr.io、GCR、GitLab，以及 1ms、南京大学等加速源；支持通过配置文件扩展私有仓库。
 - **仓库连通性预检查**：下载前访问 `https://<registry>/v2/`，对超时、DNS/网络不可达、SSL 握手失败、非 Registry 服务等情况给出明确错误。
 - **Docker / OCI 清单兼容**：清单请求同时声明 Docker 与 OCI 媒体类型，可正确处理 GHCR 上仅提供 OCI 清单的镜像（如 `ghcr.io/kite-org/kite`）。
-- **多架构选择**：支持 `amd64`、`arm64`、`arm/v7`、`s390x`、`ppc64le`；读取 manifest list 后按所选架构精确匹配，不存在的架构会直接提示。
-- **分层并行下载**：最多 8 层同时下载，逐层失败最多重试 4 次。
-- **断点续传**：目标文件已存在时通过 HTTP `Range` 从已有大小处继续；服务重启后重新点击下载同一镜像可继续使用已下载的分块文件。
+- **多架构选择**：支持 `amd64`、`arm64`、`arm/v7`、`s390x`、`ppc64le`；读取 manifest list 后按所选架构匹配（`arm/v7` 会同时校验 `architecture=arm` 与 `variant=v7`），不存在的架构会直接提示。
+- **分层并行下载**：最多 8 层同时下载，单层失败最多尝试 4 次（首次 + 3 次重试，退避间隔逐次递增）。
+- **断点续传**：目标文件已存在时通过 HTTP `Range` 从已有大小处继续；服务重启后重新点击下载同一镜像可继续使用已下载的分块文件。若服务端忽略 `Range` 返回 200，则从零覆盖写入，避免重复数据损坏镜像层。
 - **匿名访问公开仓库**：自动处理 `WWW-Authenticate` 并获取匿名 Bearer Token，适配公开镜像仓库。
-- **进度可视化**：实时展示每一层的完成百分比、已下载/总大小、整体速度与耗时。
+- **进度可视化**：实时展示每一层的完成百分比、已下载/总大小与整体速度。
 
 ### 2.3 搜索与筛选
 
-- **双数据源**：优先请求 1ms 在线索引，失败时自动降级为内置官方镜像清单，保证页面仍可检索。
+- **双数据源**：优先请求 1ms 在线索引；在线不可用时降级为内置官方镜像清单。未勾选分组时，离线结果只包含带仓库前缀的内置条目与精确匹配项；勾选「官方镜像筛选」后可检索全部 48 条内置清单。
 - **内置官方清单**：7 个分组、共 48 条常用镜像，支持多选筛选。
 - **分组筛选**：Docker 官方（12）、GitHub 官方（7）、Quay 官方（6）、Kubernetes 官方（9）、Kubernetes 旧版（5）、Google 官方（6）、GitLab 官方（3）。
 - **精确匹配优先**：输入完整仓库名时，精确结果置顶展示；Docker Hub 未收录时自动匿名探测 GHCR 同名公开仓库。
-- **分页浏览**：每页 20 条，上一页/下一页切换时保留关键词与筛选条件。
-- **Tag 自动加载**：非 Docker Hub 镜像直接读取目标仓库 `tags/list`，过滤 `sha256-*.sig` 等签名标签，并按语义版本倒序排列；Docker Hub 镜像通过 1ms 标签接口获取；异常时回退为 `latest`。
+- **分页浏览**：在线结果每页 20 条，上一页/下一页切换时保留关键词与筛选条件；第 1 页会额外并入内置清单与精确匹配结果，因此可能多于 20 条。
+- **Tag 自动加载**：非 Docker Hub 镜像直接读取目标仓库 `tags/list`，过滤 `sha256-*.sig` 等签名标签；返回的 Tag 超过 100 条时按语义版本倒序重排，否则保持仓库返回顺序。Docker Hub 镜像通过 1ms 标签接口获取；异常时回退为 `latest`。
 
 ### 2.4 界面与交互
 
@@ -127,7 +127,7 @@ Docker 镜像离线拉取器面向**内网、离线或无法直连镜像仓库**
 
 - **配置优先级**：界面选择 > 环境变量 > 配置文件 > 内置默认值。
 - **环境变量**：`DOCKER_PULL_REGISTRY`、`DOCKER_PULL_CONFIG_FILE`。
-- **代理支持**：无代理、系统代理、自定义代理（含账号密码）三种模式；自动为 `localhost` 设置 `NO_PROXY`。
+- **代理支持**：无代理、系统代理、自定义代理（含账号密码）三种模式。代理仅作用于本工具创建的 HTTP 会话，不改写进程级 `HTTP_PROXY` / `NO_PROXY` 环境变量，因此不会影响同机其它程序；选择「无代理」时也不会读取系统代理变量。
 - **SSL 校验开关**：默认开启证书校验；在使用自签证书代理等特殊环境时可关闭。
 
 ---
@@ -148,18 +148,17 @@ Docker 镜像离线拉取器面向**内网、离线或无法直连镜像仓库**
 **依赖清单（`requirements.txt`）**
 
 ```text
-certifi==2025.1.31
-charset-normalizer==3.4.1
-idna==3.10
-requests==2.32.3
-urllib3==2.3.0
+# 运行依赖（Web 服务）；测试依赖见 requirements-dev.txt
+requests>=2.32.4     # < 2.32.4 存在已公开漏洞（CVE-2024-47081）
+urllib3>=2.5.0       # < 2.5.0 存在已公开漏洞（CVE-2025-50181）
 gradio>=6.14.0
-pytest>=8.0.0        # 测试依赖
 ```
 
-其中 `certifi`、`charset-normalizer`、`idna` 为 `requests` 的传递依赖，固定版本用于保证环境可复现。
+测试与开发额外需要 `pytest>=8.0.0`，由 `requirements-dev.txt` 统一提供（内容为 `-r requirements.txt` 加 pytest）。
 
-本项目为纯 Python 项目：依赖由 `requirements.txt` 管理，测试配置由 `pyproject.toml` 管理，**不存在 `package.json`、npm 构建或前端打包步骤**。
+依赖采用**下限约束**而非精确锁定：既避免落入存在漏洞的旧版本，也避免与 Gradio 自身的传递依赖产生冲突。需要完全可复现的环境时，可自行 `pip freeze > requirements.lock.txt`。
+
+本项目为纯 Python 项目：运行依赖由 `requirements.txt` 管理，开发依赖由 `requirements-dev.txt` 管理，测试配置由 `pyproject.toml` 管理，**不存在 `package.json`、npm 构建或前端打包步骤**。
 
 **环境自检**
 
@@ -226,6 +225,12 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 python -c "import gradio, requests; print('gradio', gradio.__version__, '| requests', requests.__version__)"
 ```
 
+仅需运行服务时安装到这里即可。如需执行单元测试，额外安装开发依赖：
+
+```bash
+pip install -r requirements-dev.txt
+```
+
 ### 4.4 可选：配置镜像仓库
 
 不配置时，Web 版默认使用 `docker.1ms.run` 加速源，页面顶部「镜像仓库」下拉框可随时切换。
@@ -245,6 +250,7 @@ python -c "import gradio, requests; print('gradio', gradio.__version__, '| reque
 - `registries` 的值支持 `"host"` 字符串或 `{"name": ..., "host": ..., "description": ...}` 对象。
 - `host` 只填主机名（可含端口），不要带 `https://` 前缀或路径。
 - 与内置预置项同名（如 `ghcr`）时，以配置文件中的地址为准。
+- `default_registry` 填写的别名必须存在于 `registries` 或内置预置项中；若无法识别，启动时会输出 `RuntimeWarning` 并回退到内置默认仓库，不会导致启动失败。
 - 使用其它路径的配置文件：设置 `DOCKER_PULL_CONFIG_FILE`；只想临时切换默认仓库：设置 `DOCKER_PULL_REGISTRY`。
 
 环境变量清单见 [.env.example](./.env.example)（该文件仅作模板，项目不会自动加载 `.env`），在启动前按 Shell 语法设置：
@@ -267,7 +273,7 @@ export DOCKER_PULL_CONFIG_FILE=./registry_config.json
 
 | 别名 | 名称 | 地址 |
 | --- | --- | --- |
-| `docker` | Docker Hub（官方） | `registry-1.docker.io` |
+| `docker` | Docker Hub (官方) | `registry-1.docker.io` |
 | `ghcr` | GitHub Container Registry | `ghcr.io` |
 | `quay` | Quay.io | `quay.io` |
 | `k8s` | Kubernetes 官方镜像 | `registry.k8s.io` |
@@ -275,7 +281,7 @@ export DOCKER_PULL_CONFIG_FILE=./registry_config.json
 | `gcr` | Google Container Registry | `gcr.io` |
 | `gitlab` | GitLab Container Registry | `registry.gitlab.com` |
 | `mirror-1ms` | 1ms 专属加速 | `docker.1ms.run` |
-| `mirror-nju` | 国内源：南京大学 | `docker.nju.edu.cn` |
+| `mirror-nju` | 国内源: 南大 | `docker.nju.edu.cn` |
 
 ### 4.5 启动服务
 
@@ -341,7 +347,8 @@ demo.launch(
     server_port=7860,         # 按需修改端口
     inbrowser=True,
     theme=gr.themes.Soft(primary_hue="blue"),
-    css=CUSTOM_CSS
+    css=CUSTOM_CSS,
+    favicon_path=str(favicon_path) if favicon_path.exists() else None
 )
 ```
 
@@ -366,7 +373,7 @@ nohup python app.py > app.log 2>&1 &
 2. **打开页面**：浏览器访问 `http://127.0.0.1:7860`，确认页面标题与三步式布局正常加载（对照[页面首屏](./screenshots/01-overview.png)）。
 3. **选择全局设置**（可选）：展开「全局设置」，确认镜像保存目录（默认 `downloads`）、镜像仓库、SSL 校验与代理模式（对照[全局设置](./screenshots/02-settings.png)）。
 4. **搜索镜像**：在第一步输入关键词，得到结果表格；点击目标行后，第二步会显示当前选中镜像并自动加载 Tag（对照[搜索结果](./screenshots/03-search.png)）。
-5. **确认参数**：选择 Tag 与架构，确认「当前选中目标」与最终拉取的仓库地址（对照[选择参数](./screenshots/04-select-params.png)）。
+5. **确认参数**：选择 Tag 与架构，第二步会显示「当前选中目标」的仓库路径；完整镜像地址与下载进度在点击下载后于进度面板显示（对照[选择参数](./screenshots/04-select-params.png)）。
 6. **开始下载**：点击「开始下载 & 导出」，观察实时进度；完成后页面提示产物路径，第三步文件列表自动刷新（对照[下载进度](./screenshots/05-progress.png)与[下载完成](./screenshots/06-download-done.png)）。
 7. **导入镜像**：将 `.tar` 复制到目标机器执行 `docker load -i <文件>`。
 
@@ -385,7 +392,7 @@ nohup python app.py > app.log 2>&1 &
 - 删除命令行脚本与 1ms 专版客户端入口，项目不再提供终端交互式拉取方式。
 - 删除 PyInstaller 打包脚本、EXE 版本资源、构建清理脚本与打包说明文档，不再分发单文件可执行程序。
 - 删除对应的客户端单元测试，测试范围收敛到 Web 服务链路。
-- 移除仅客户端使用的 `tqdm` 依赖，`requirements.txt` 仅保留 Web 运行与测试所需依赖。
+- 移除仅客户端使用的 `tqdm` 依赖，`requirements.txt` 仅保留 Web 运行所需依赖。
 - 当前唯一入口为 `python app.py`，运行形态固定为本地 B/S。
 
 ### 6.2 界面重构
@@ -412,7 +419,8 @@ nohup python app.py > app.log 2>&1 &
 ### 6.4 工程化调整
 
 - 保留并扩充 `tests/` 测试集，覆盖配置解析、地址重写、连通性检查、搜索、拉取流程与真实仓库集成测试。
-- 最近一次本地测试结果：**174 通过、13 跳过**（未开启真实网络集成测试）。
+- 依赖拆分为 `requirements.txt`（运行）与 `requirements-dev.txt`（开发/测试）。
+- 最近一次本地测试结果：**176 通过、13 跳过**（未开启真实网络集成测试）。
 
 ---
 
@@ -438,7 +446,7 @@ nohup python app.py > app.log 2>&1 &
 
 | 设置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| 镜像保存目录 | `downloads` | 相对项目根目录；不存在会自动创建；产物 tar 直接写入该目录 |
+| 镜像保存目录 | `downloads` | 相对启动服务时的当前工作目录（在项目根目录执行 `python app.py` 时即项目根目录）；不存在会自动创建；产物 tar 直接写入该目录 |
 | 镜像仓库 | `1ms 专属加速 (docker.1ms.run)`（未配置时） | 下拉选择预置仓库或配置中的自定义仓库；对不含仓库前缀的镜像生效 |
 | 开启 SSL 证书验证 | 勾选 | 代理使用自签证书、企业证书或证书链异常时可取消勾选 |
 | 代理模式 | 无代理 | 可选「系统代理」或「自定义代理」；自定义模式支持 `host:port` 与用户名密码 |
@@ -459,7 +467,7 @@ nohup python app.py > app.log 2>&1 &
 - 搜索框输入后需点击「搜索」按钮触发，回车不会提交。
 - 结果表头部右侧提供复制数据与全屏按钮，便于查看较宽的列。
 - 在线索引主要覆盖 Docker Hub；GHCR、Quay 等仓库的镜像建议输入完整仓库引用，或从内置官方清单中选择。
-- 在线索引不可用时，页面会退化为内置清单检索，仍可完成常见官方镜像的查找与下载。
+- 在线索引不可用时，页面会退化为内置清单检索：未勾选分组时只匹配带仓库前缀的内置条目与精确镜像名，勾选「官方镜像筛选」后可检索全部 48 条内置清单。
 - 输入完整仓库名（含 `/` 或已知仓库前缀）时会优先按精确匹配处理，并将结果置顶；Docker Hub 未收录时自动探测 GHCR 同名公开仓库。
 - 每页 20 条，底部显示「第 x / y 页（共 n 个结果）」，翻页复用当前关键词与筛选条件。
 
@@ -468,7 +476,7 @@ nohup python app.py > app.log 2>&1 &
 ![选择参数](./screenshots/04-select-params.png)
 
 - **当前选中目标**：显示点击的镜像仓库路径，只读；若带仓库前缀（如 `ghcr.io/...`、`quay.io/...`），下载时优先使用该前缀。
-- **Tag**：点击结果行后自动加载目标仓库的标签列表，按语义版本倒序排列并过滤签名标签；加载失败时仅保留 `latest`。
+- **Tag**：点击结果行后自动加载目标仓库的标签列表并过滤签名标签；返回标签超过 100 条时按语义版本倒序重排，否则保持仓库返回顺序；加载失败时仅保留 `latest`。
 - **架构**：`amd64`（默认）、`arm64`、`arm/v7`、`s390x`、`ppc64le`。
 - **开始下载 & 导出**：未选择镜像时点击会提示先在表格中选择一行。
 
@@ -478,14 +486,14 @@ nohup python app.py > app.log 2>&1 &
 | --- | --- | --- |
 | `nginx:latest` | `ghcr.io` | `ghcr.io/library/nginx:latest` |
 | `nginx:latest` | 未指定 | `registry-1.docker.io/library/nginx:latest` |
-| `docker.io/library/nginx:latest` | `quay.io` | `quay.io/library/nginx:latest` |
+| `docker.io/library/nginx:latest` | `quay.io` | `docker.io/library/nginx:latest`（保留自带仓库前缀） |
 | `ghcr.io/foo/bar:1.0` | 任意 | `ghcr.io/foo/bar:1.0`（保留自带仓库） |
 
-单段镜像名按 Docker Hub 习惯自动补全 `library/`。目标仓库路径结构不同的镜像（如 `registry.k8s.io/pause`），请直接输入完整名称。
+只有 Docker Hub（含 1ms、南大等 Hub 加速源）的单段镜像名才会补全 `library/`；`registry.k8s.io/pause` 这类目标仓库路径结构不同的镜像，单段名保持原样，不会补 `library/`。
 
 ### 7.5 下载与产物
 
-点击「开始下载 & 导出」后，服务端依次执行：连通性检查 → 获取清单 → 获取匿名 Token → 下载 Config 与各层 → 解压并组装 → 打包 tar → 清理中间层目录。
+点击「开始下载 & 导出」后，服务端依次执行：连通性检查 → 获取匿名 Token → 读取清单并匹配架构 → 下载 Config 与各层 → 解压并组装 → 打包 tar。中间层目录会保留在输出目录中，便于失败后断点续传，可手动删除。
 
 下载中的进度面板：
 
@@ -538,7 +546,7 @@ docker tag kite-org/kite:v0.15.1 ghcr.io/kite-org/kite:v0.15.1
 
 - **系统代理**：读取操作系统代理设置。
 - **自定义代理**：填写 `host:port`，如 `127.0.0.1:7890`；支持用户名与密码。
-- 服务会自动为 `localhost`、`127.0.0.1` 设置 `NO_PROXY`，避免本地访问被代理拦截。
+- 代理只对本工具发起的请求生效，不会修改进程的 `HTTP_PROXY` / `NO_PROXY` 等环境变量；选择「无代理」时也不会复用系统代理。
 - 关闭 SSL 校验会降低传输安全性，仅在明确知道代理证书问题时使用。
 
 ---
@@ -550,7 +558,8 @@ docker-pull-tar-main/
 ├── app.py                            # 唯一运行入口：Gradio Web 服务、拉取逻辑、搜索与文件管理
 ├── registry_config.py                # 仓库配置加载、地址解析与前缀替换、连通性预检查
 ├── official_images.py                # 7 组官方镜像清单与本地检索、分页常量
-├── requirements.txt                  # Web 运行与测试依赖
+├── requirements.txt                  # Web 运行依赖
+├── requirements-dev.txt              # 开发/测试依赖（pytest）
 ├── pyproject.toml                    # pytest 等工具配置
 ├── README.md                         # 项目说明：部署、使用、排查
 ├── CONTRIBUTING.md                   # 贡献指南：开发环境、编码与提交规范
@@ -561,7 +570,7 @@ docker-pull-tar-main/
 ├── .editorconfig                     # 编辑器缩进与编码约定
 ├── .gitignore                        # 忽略规则：产物、缓存、本地配置
 ├── favicon.ico                       # 浏览器页签图标
-├── downloads/                        # 默认镜像输出目录（产物不入库）
+├── downloads/                        # 默认镜像输出目录（产物不入库，仅保留 .gitkeep）
 ├── screenshots/                      # 本文档使用的界面截图
 └── tests/                            # pytest 测试集
     ├── conftest.py                   # 环境变量隔离与公共 fixture
@@ -604,7 +613,7 @@ docker-pull-tar-main/
 python -m pytest tests -q
 ```
 
-当前测试结果为 **174 通过、13 跳过**（跳过项为需要真实网络的集成测试）。
+当前测试结果为 **176 通过、13 跳过**（跳过项为需要真实网络的集成测试）。
 
 真实仓库集成测试默认关闭，需显式开启：
 
@@ -627,7 +636,7 @@ RUN_REGISTRY_PULL_TESTS=1 python -m pytest tests/test_integration_registries.py 
 
 - `tests/test_pull_flow.py` 依赖 Gradio，未安装 Gradio 时会自动跳过。
 - `tests/conftest.py` 会隔离 `DOCKER_PULL_REGISTRY` 与 `DOCKER_PULL_CONFIG_FILE`，避免本机环境影响测试结果。
-- 集成测试会真实访问 Docker Hub、GHCR、Quay 等仓库，请在网络可用且允许外联的环境执行。
+- 集成测试会真实访问 GHCR、Quay、registry.k8s.io、k8s.gcr.io、gcr.io、GitLab 等仓库（`real_pull` 用例额外访问 Docker Hub），请在网络可用且允许外联的环境执行。
 
 ---
 
@@ -653,6 +662,7 @@ RUN_REGISTRY_PULL_TESTS=1 python -m pytest tests/test_integration_registries.py 
 - 扩展架构选项并支持按 manifest 动态生成。
 - 增加配置文件的界面化管理与镜像站测速择优。
 - 增加 HTTPS、访问鉴权与部署脚本，便于在受控内网中长期运行。
+- 将下载目录限制在允许的根路径内，降低误写入风险。
 
 > 以上为规划项，尚未在当前版本实现。
 

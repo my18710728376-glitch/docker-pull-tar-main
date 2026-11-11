@@ -225,12 +225,30 @@ def load_registry_config(config_path: Optional[str] = None, strict: bool = True)
         default_selector = env_selector.strip()
         default_source = "env"
 
-    return RegistryConfig(
+    config = RegistryConfig(
         registries=catalog,
         default_selector=default_selector,
         default_source=default_source,
         config_path=resolved_path,
     )
+
+    # 默认仓库可能来自配置文件或环境变量，别名写错时在这里拦截：
+    # 非严格模式下告警并回退到内置默认，避免整个应用在导入期启动失败
+    if default_selector:
+        try:
+            resolve_registry(default_selector, config)
+        except RegistryConfigError as exc:
+            if strict:
+                raise
+            warnings.warn(f"忽略无效的默认镜像仓库配置: {exc}", RuntimeWarning)
+            config = RegistryConfig(
+                registries=catalog,
+                default_selector=None,
+                default_source="builtin",
+                config_path=resolved_path,
+            )
+
+    return config
 
 
 def resolve_registry(selector: Optional[str] = None, config: Optional[RegistryConfig] = None) -> RegistryOption:
