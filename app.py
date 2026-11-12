@@ -518,10 +518,35 @@ def _registry_in_scope(host, allowed_hosts):
     return host in DOCKER_HUB_HOSTS and any(h in DOCKER_HUB_HOSTS for h in allowed_hosts)
 
 
+# 镜像来源展示名：按仓库 host 映射为可读名称，未知仓库直接显示 host
+REGISTRY_SOURCE_LABELS = {
+    "docker.io": "Docker Hub",
+    "registry-1.docker.io": "Docker Hub",
+    "index.docker.io": "Docker Hub",
+    "ghcr.io": "GitHub (GHCR)",
+    "quay.io": "Quay.io",
+    "registry.k8s.io": "Kubernetes",
+    "k8s.gcr.io": "Kubernetes (旧版)",
+    "gcr.io": "Google (GCR)",
+    "registry.gitlab.com": "GitLab",
+    "docker.1ms.run": "1ms 加速源",
+    "docker.nju.edu.cn": "南京大学镜像源",
+}
+
+
+def _registry_source_label(host):
+    """把镜像仓库 host 转成表格「仓库来源」列的展示文本。"""
+    key = str(host or "").strip().lower()
+    if not key:
+        return REGISTRY_SOURCE_LABELS["docker.io"]
+    return REGISTRY_SOURCE_LABELS.get(key, key)
+
+
 def _rows_from_api_items(items, allowed_hosts=None):
     """把 1ms 搜索接口返回的条目转换为表格行。
 
     allowed_hosts 非空时只保留属于这些仓库的条目，用于分组筛选时的范围约束。
+    行结构：镜像名称、仓库来源、Stars、Pulls、更新日期、描述。
     """
     rows = []
     for it in items:
@@ -533,6 +558,7 @@ def _rows_from_api_items(items, allowed_hosts=None):
         repo = f"{ns}/{name}" if ns else name
         rows.append([
             repo,
+            _registry_source_label(registry),
             it.get("star_count", 0),
             it.get("pull_count", 0),
             it.get("last_modified", "")[:10],
@@ -541,9 +567,10 @@ def _rows_from_api_items(items, allowed_hosts=None):
     return rows
 
 
-def _rows_from_official_images(images):
-    """把内置官方镜像条目转换为表格行。"""
-    return [[image.repo, 0, 0, "", image.description[:50]] for image in images]
+def _rows_from_official_images(images, host=""):
+    """把内置官方镜像条目转换为表格行（按所属仓库标注来源）。"""
+    source = _registry_source_label(host)
+    return [[image.repo, source, 0, 0, "", image.description[:50]] for image in images]
 
 
 DOCKER_HUB_HOSTS = ("docker.io", "registry-1.docker.io", "index.docker.io")
@@ -669,7 +696,8 @@ def resolve_exact_result(keyword, session):
 
     if registry and registry.lower() not in DOCKER_HUB_HOSTS:
         # 非 Docker Hub 的完整引用无法在线校验元数据，直接生成精确匹配结果
-        return [f"{registry}/{repository}", 0, 0, "", "精确匹配（非 Docker Hub 镜像）"]
+        return [f"{registry}/{repository}", _registry_source_label(registry), 0, 0, "",
+                "精确匹配（非 Docker Hub 镜像）"]
 
     repo = normalize_repository(repository)
     try:
@@ -679,6 +707,7 @@ def resolve_exact_result(keyword, session):
             repo_name = "/".join(part for part in (item.get("namespace"), item.get("name")) if part) or repo
             return [
                 repo_name,
+                _registry_source_label("docker.io"),
                 item.get("star_count", 0),
                 item.get("pull_count", 0),
                 (item.get("last_updated") or "")[:10],
@@ -689,7 +718,8 @@ def resolve_exact_result(keyword, session):
 
     # Docker Hub 未收录时探测 GitHub Container Registry 上的同名公开仓库
     if probe_public_repository(session, GHCR_HOST, repo):
-        return [f"{GHCR_HOST}/{repo}", 0, 0, "", f"精确匹配（{GHCR_HOST}）"]
+        return [f"{GHCR_HOST}/{repo}", _registry_source_label(GHCR_HOST), 0, 0, "",
+                f"精确匹配（{GHCR_HOST}）"]
     return None
 
 
@@ -740,7 +770,7 @@ def _local_index_rows(keyword):
         if not host or host.lower() in DOCKER_HUB_HOSTS:
             continue
         if text in repo_path.rsplit("/", 1)[-1].lower():
-            rows.append([image.repo, 0, 0, "", image.description[:50]])
+            rows.append([image.repo, _registry_source_label(host), 0, 0, "", image.description[:50]])
 
     rows.sort(key=lambda row: (row[0].rsplit("/", 1)[-1].lower() != text, row[0].lower()))
     return rows
@@ -765,7 +795,13 @@ def execute_official_search(keyword, target_page, official_keys, session):
     在线结果按分组对应的仓库 host 过滤，避免混入其它仓库。
     """
     scope = "、".join(get_group_names(official_keys))
-    rows = _rows_from_official_images(search_images(keyword, official_keys))
+    # 每个分组对应一个仓库 host，逐组转换以便为每行标注正确的来源
+    rows = []
+    for key in official_keys:
+        group = OFFICIAL_IMAGE_GROUPS.get(key)
+        if group is None:
+            continue
+        rows.extend(_rows_from_official_images(search_images(keyword, [key]), group.host))
     allowed_hosts = {OFFICIAL_IMAGE_GROUPS[key].host.lower() for key in official_keys}
 
     online_error = None
@@ -1110,8 +1146,10 @@ with gr.Blocks(title="Docker 镜像离线下载工具", fill_width=True) as demo
             search_btn = gr.Button("🔍 搜索", variant="primary", scale=1)
 
         df_results = gr.Dataframe(
-            headers=["镜像名称 (Repo)", "⭐ Stars", "⬇️ Pulls", "更新日期", "描述"],
+            headers=["镜像名称 (Repo)", "仓库来源", "⭐ Stars", "⬇️ Pulls", "更新日期", "描述"],
             interactive=False, wrap=True, type="array", max_height=360,
+            show_search="filter",
+            column_widths=["27%", "14%", "8%", "11%", "10%", "30%"],
             elem_id="dp-results"
         )
 

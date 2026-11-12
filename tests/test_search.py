@@ -48,8 +48,10 @@ def search(keyword, page=1, official_keys=None):
     return app.execute_search(keyword, page, *PROXY_ARGS, official_keys=official_keys)
 
 
-def api_item(namespace, name, stars=1, pulls=2, description="", modified="2026-01-01T00:00:00Z"):
+def api_item(namespace, name, stars=1, pulls=2, description="", modified="2026-01-01T00:00:00Z",
+             registry="docker.io"):
     return {
+        "registry": registry,
         "namespace": namespace,
         "name": name,
         "star_count": stars,
@@ -85,7 +87,8 @@ def test_unfiltered_exact_match_is_moved_to_front(monkeypatch):
     rows, _, info, _, _ = search("kite-org/kite")
 
     assert rows[0][0] == "kite-org/kite"
-    assert rows[0][1] == 9
+    assert rows[0][1] == "Docker Hub"
+    assert rows[0][2] == 9
     assert "共 3 个结果" in info
     assert [row[0] for row in rows[1:]] == ["library/nginx", "kite-images/kite"]
 
@@ -126,7 +129,8 @@ def test_unfiltered_non_hub_reference_is_exact_result(monkeypatch):
     rows, _, info, _, _ = search("ghcr.io/linuxcontainers/alpine")
 
     assert rows[0][0] == "ghcr.io/linuxcontainers/alpine"
-    assert "精确匹配" in rows[0][4]
+    assert rows[0][1] == "GitHub (GHCR)"
+    assert "精确匹配" in rows[0][5]
     assert "共 2 个结果" in info
 
 
@@ -138,7 +142,8 @@ def test_unfiltered_exact_match_falls_back_to_ghcr(monkeypatch):
     rows, _, info, _, _ = search("kite-org/kite")
 
     assert rows[0][0] == "ghcr.io/kite-org/kite"
-    assert "ghcr.io" in rows[0][4]
+    assert rows[0][1] == "GitHub (GHCR)"
+    assert "ghcr.io" in rows[0][5]
     assert "共 3 个结果" in info
 
 
@@ -478,3 +483,28 @@ def test_selected_group_falls_back_when_online_index_fails(monkeypatch):
 
     assert [row[0] for row in rows] == ["registry.k8s.io/kubectl"]
     assert "在线索引不可用" in info
+
+
+def test_search_rows_expose_registry_source(monkeypatch):
+    """搜索结果每一行都应带仓库来源，且不同仓库显示不同来源。"""
+    items = [
+        api_item("library", "nginx"),
+        api_item("prometheus", "alertmanager", registry="quay.io"),
+    ]
+    install_session(monkeypatch, make_session(items))
+
+    rows, _, _, _, _ = search("nginx")
+
+    assert all(row[1] for row in rows), "存在来源为空的记录"
+    assert rows[0][1] == "Docker Hub"
+    assert any(row[1] == "Quay.io" for row in rows)
+
+
+def test_official_search_rows_carry_group_source(monkeypatch):
+    """分组筛选时内置清单行的来源应与所选分组仓库一致。"""
+    install_session(monkeypatch, make_session([]))
+
+    rows, _, _, _, _ = search("nginx", official_keys=["docker"])
+
+    assert [row[0] for row in rows] == ["library/nginx"]
+    assert rows[0][1] == "Docker Hub"
