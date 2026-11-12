@@ -42,12 +42,18 @@ class FakeSession:
     def __init__(self, handler):
         self._handler = handler
         self.requested_urls = []
+        self.requested_calls = []
         self.verify = True
         self.proxies = {}
+        self.closed = False
 
     def get(self, url, headers=None, stream=False, timeout=None, **kwargs):
         self.requested_urls.append(url)
+        self.requested_calls.append((url, kwargs))
         return self._handler(url, headers, stream, timeout, **kwargs)
+
+    def close(self):
+        self.closed = True
 
 
 def make_digest(prefix: str) -> str:

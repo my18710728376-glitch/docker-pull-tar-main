@@ -241,7 +241,7 @@ def get_session(verify_ssl, proxies, trust_env=False) -> requests.Session:
     trust_env 为 False 时不读取进程环境变量中的代理，确保界面选择生效。
     """
     session = requests.Session()
-    retry = Retry(total=3, backoff_factor=BACKOFF_BASE, status_forcelist=[429, 500, 502, 503, 504])
+    retry = Retry(total=2, backoff_factor=BACKOFF_BASE, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry, pool_connections=64, pool_maxsize=128)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
@@ -252,32 +252,33 @@ def get_session(verify_ssl, proxies, trust_env=False) -> requests.Session:
 
 
 def get_auth_head(session, registry, repository):
-    try:
-        ping_url = f"https://{registry}/v2/"
-        resp = session.get(ping_url, timeout=10)
-        if resp.status_code == 401 and "WWW-Authenticate" in resp.headers:
-            www = resp.headers["WWW-Authenticate"]
-            auth_url = www.split('"')[1]
-            reg_service = www.split('"')[3]
-            token_url = f"{auth_url}?service={reg_service}&scope=repository:{repository}:pull"
-            t_resp = session.get(token_url, timeout=10)
-            t_resp.raise_for_status()
-            access_token = t_resp.json()["token"]
-            return {
-                "Authorization": f"Bearer {access_token}",
-                "Accept": MANIFEST_ACCEPT
-            }
-    except Exception as e:
-        print(f"Auth Ping Fallback: {e}")
+    """构造拉取清单所需的请求头。
+
+    复用 _registry_access_token 的解析逻辑：公开仓库无需 Authorization，
+    需要匿名 Bearer Token 的仓库（GHCR、Quay 等）附带 token。
+    """
+    token = _registry_access_token(session, registry, repository)
+    if token:
+        return {"Authorization": f"Bearer {token}", "Accept": MANIFEST_ACCEPT}
     return {"Accept": MANIFEST_ACCEPT}
 
 
+def _sha256_of_file(path, chunk_size=1024 * 1024):
+    """计算文件 SHA256，用于校验下载的 blob 与清单 digest 一致。"""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fp:
+        for chunk in iter(lambda: fp.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def download_file_chunked(session, url, headers, save_path, desc, expected_digest, progress: WebProgressDisplay):
-    """下载单个 blob，支持断点续传。
+    """下载单个 blob，支持断点续传，并按 digest 校验完整性。
 
     每次重试都会重新读取已落盘大小并重新构造 Range 头：
     若沿用旧偏移追加写入，会让同一段数据重复写进文件导致层损坏。
     服务端忽略 Range 返回 200 全量内容时从零覆盖写入。
+    下载完成后计算 SHA256，与清单中的 digest 不一致时删除文件并重试。
     """
     for attempt in range(DOWNLOAD_MAX_RETRIES):
         if progress.error_msg: return False
@@ -320,6 +321,13 @@ def download_file_chunked(session, url, headers, save_path, desc, expected_diges
                                 progress.stats.speeds.append(speed)
                                 last_size = downloaded_size
                                 last_update = now
+            if expected_digest:
+                actual_digest = f"sha256:{_sha256_of_file(save_path)}"
+                if actual_digest != expected_digest.lower():
+                    os.remove(save_path)
+                    raise ValueError(
+                        f"校验失败: {desc} 内容与 digest 不一致（期望 {expected_digest}，实际 {actual_digest}）"
+                    )
             progress.complete_layer(desc)
             return True
         except Exception as e:
@@ -341,6 +349,7 @@ def _split_arch(arch):
 
 
 def pull_image_logic(progress: WebProgressDisplay, registry, repository, tag, arch, output_dir, proxy_args):
+    session = None
     try:
         proxies = apply_proxy_config(*proxy_args[:4])
         session = get_session(proxy_args[4], proxies, trust_env=(proxy_args[0] == "系统代理"))
@@ -445,9 +454,15 @@ def pull_image_logic(progress: WebProgressDisplay, registry, repository, tag, ar
             tar_path = ldir / "layer.tar"
 
             if gz_path.exists():
-                with gzip.open(gz_path, "rb") as gz, open(tar_path, "wb") as file:
-                    shutil.copyfileobj(gz, file)
-                os.remove(gz_path)
+                # OCI 允许未压缩层，按 gzip 魔数判断，避免无脑解压报错
+                with open(gz_path, "rb") as probe:
+                    magic = probe.read(2)
+                if magic == b"\x1f\x8b":
+                    with gzip.open(gz_path, "rb") as gz, open(tar_path, "wb") as file:
+                        shutil.copyfileobj(gz, file)
+                    os.remove(gz_path)
+                else:
+                    os.replace(gz_path, tar_path)
 
             with open(ldir / "json", "w") as f:
                 json.dump({"id": fake_layerid, "parent": parent_layerid if parent_layerid else None}, f)
@@ -475,6 +490,9 @@ def pull_image_logic(progress: WebProgressDisplay, registry, repository, tag, ar
         import traceback
         traceback.print_exc()
         progress.error_msg = str(e)
+    finally:
+        if session is not None:
+            session.close()
 
 
 # --------------------------
@@ -857,7 +875,14 @@ def execute_search(keyword, target_page, p_mode, p_host, p_user, p_pass, vSSL, o
 
     proxies = apply_proxy_config(p_mode, p_host, p_user, p_pass)
     session = get_session(vSSL, proxies, trust_env=(p_mode == "系统代理"))
+    try:
+        return _search_with_session(keyword, target_page, official_keys, session)
+    finally:
+        # 每次搜索都会新建 Session，用完立即释放连接池
+        session.close()
 
+
+def _search_with_session(keyword, target_page, official_keys, session):
     official_keys = normalize_group_keys(official_keys)
     if official_keys:
         return execute_official_search(keyword, target_page, official_keys, session)
@@ -907,7 +932,13 @@ def execute_search(keyword, target_page, p_mode, p_host, p_user, p_pass, vSSL, o
 def fn_get_tags(selected_repo, p_mode, p_host, p_user, p_pass, vSSL):
     proxies = apply_proxy_config(p_mode, p_host, p_user, p_pass)
     session = get_session(vSSL, proxies, trust_env=(p_mode == "系统代理"))
+    try:
+        return _get_tags_with_session(selected_repo, session)
+    finally:
+        session.close()
 
+
+def _get_tags_with_session(selected_repo, session):
     # 镜像自带仓库前缀时（如 ghcr.io/kite-org/kite）直接从该仓库读取标签
     try:
         registry, repository, _tag = split_image_reference(selected_repo)

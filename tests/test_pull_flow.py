@@ -1,3 +1,5 @@
+import hashlib
+import json
 import tarfile
 
 import pytest
@@ -157,3 +159,55 @@ def test_pull_flow_reports_connectivity_error(tmp_path, monkeypatch):
     assert "无法连接镜像仓库" in progress.error_msg
     assert host in progress.error_msg
     assert not (tmp_path / "library_nginx_latest_amd64.tar").exists()
+
+
+def test_pull_rejects_layer_with_wrong_digest(tmp_path, monkeypatch):
+    """层内容与 digest 不一致时应中断并报校验失败，而不是打包坏镜像。"""
+    host = "example.test"
+    manifest, blobs = build_single_arch_manifest([b"expected-layer"])
+    layer_digest = manifest["layers"][0]["digest"]
+    blobs[layer_digest] = b"tampered-layer-content"
+
+    session = FakeSession(make_registry_handler(host, manifest, blobs))
+    _install_fake_network(monkeypatch, session)
+
+    progress = app.WebProgressDisplay()
+    app.pull_image_logic(
+        progress, host, "demo/app", "1.0", "amd64",
+        str(tmp_path), ("无代理", "", "", "", True)
+    )
+
+    assert not progress.is_done
+    assert "校验失败" in progress.error_msg
+    assert not (tmp_path / "demo_app_1.0_amd64.tar").exists()
+
+
+def test_pull_handles_uncompressed_layer(tmp_path, monkeypatch):
+    """OCI 允许未压缩层，应按魔数判断而不是无脑 gzip 解压。"""
+    host = "example.test"
+    config_bytes = json.dumps({"architecture": "amd64", "os": "linux"}).encode("utf-8")
+    config_digest = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+    raw_layer = b"uncompressed-layer-payload"
+    layer_digest = "sha256:" + hashlib.sha256(raw_layer).hexdigest()
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"digest": config_digest, "size": len(config_bytes)},
+        "layers": [{"digest": layer_digest, "size": len(raw_layer)}],
+    }
+    blobs = {config_digest: config_bytes, layer_digest: raw_layer}
+
+    session = FakeSession(make_registry_handler(host, manifest, blobs))
+    _install_fake_network(monkeypatch, session)
+
+    progress = app.WebProgressDisplay()
+    app.pull_image_logic(
+        progress, host, "demo/app", "1.0", "amd64",
+        str(tmp_path), ("无代理", "", "", "", True)
+    )
+
+    assert progress.error_msg == "", progress.error_msg
+    assert progress.is_done
+    with tarfile.open(tmp_path / "demo_app_1.0_amd64.tar") as tar:
+        names = tar.getnames()
+    assert any(name.endswith("/layer.tar") for name in names)

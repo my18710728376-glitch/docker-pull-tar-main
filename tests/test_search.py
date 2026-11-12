@@ -332,6 +332,9 @@ def test_global_search_falls_back_when_online_index_fails(monkeypatch):
         def get(self, *args, **kwargs):
             raise OSError("offline")
 
+        def close(self):
+            pass
+
     monkeypatch.setattr(app, "get_session", lambda *a, **k: OfflineSession())
 
     rows, page, info, _, _ = search("kubectl")
@@ -477,6 +480,9 @@ def test_selected_group_falls_back_when_online_index_fails(monkeypatch):
         def get(self, *args, **kwargs):
             raise OSError("offline")
 
+        def close(self):
+            pass
+
     monkeypatch.setattr(app, "get_session", lambda *a, **k: OfflineSession())
 
     rows, _, info, _, _ = search("kubectl", official_keys=["k8s"])
@@ -508,3 +514,25 @@ def test_official_search_rows_carry_group_source(monkeypatch):
 
     assert [row[0] for row in rows] == ["library/nginx"]
     assert rows[0][1] == "Docker Hub"
+
+
+def test_search_releases_session(monkeypatch):
+    """每次搜索新建的 Session 应在返回前关闭，避免连接池泄漏。"""
+    session = make_session([api_item("library", "nginx")])
+    install_session(monkeypatch, session)
+
+    search("nginx")
+
+    assert session.closed
+
+
+def test_pagination_requests_requested_online_page(monkeypatch):
+    """翻页时应把目标页码传给在线索引。"""
+    session = make_session([api_item("library", "nginx")])
+    install_session(monkeypatch, session)
+
+    search("nginx", page=2)
+
+    page_params = [kwargs.get("params", {}).get("page")
+                   for url, kwargs in session.requested_calls if "1ms.run" in url]
+    assert page_params == [2]
