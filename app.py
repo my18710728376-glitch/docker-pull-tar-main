@@ -358,6 +358,8 @@ def pull_image_logic(progress: WebProgressDisplay, registry, repository, tag, ar
 
         mani_url = f"https://{registry}/v2/{repository}/manifests/{tag}"
         resp = session.get(mani_url, headers=auth_head, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+        if resp.status_code == 404:
+            raise ValueError(f"Tag 不存在: {registry}/{repository}:{tag}，请检查 Tag 名称是否正确")
         resp.raise_for_status()
         resp_json = resp.json()
 
@@ -890,7 +892,9 @@ def fn_get_tags(selected_repo, p_mode, p_host, p_user, p_pass, vSSL):
         items = resp.json().get("data", {}).get("list", [])
         tags = [it.get("tag_name") for it in items if it.get("tag_name")]
         if not tags: tags = ["latest"]
-        return gr.update(choices=tags, value="latest", interactive=True)
+        # 列表里没有 latest 时取第一个标签作为默认值，避免下拉框初值不在选项中
+        default = "latest" if "latest" in tags else tags[0]
+        return gr.update(choices=tags, value=default, interactive=True)
     except Exception:
         return gr.update(choices=["latest"], value="latest", interactive=True)
 
@@ -913,6 +917,16 @@ def resolve_pull_target(repo, tag, registry):
 def fn_download_manager(repo, tag, arch, registry, out_dir, p_mode, p_host, p_user, p_pass, vSSL):
     if not repo:
         yield '<div style="color:red;font-weight:bold;">❌ 请先在上方搜索并在表格中点击选择一个镜像！</div>', gr.skip(), gr.skip()
+        return
+
+    # Tag 支持下拉选择与手动输入，先做基础校验，避免把空值或非法字符拼进请求地址
+    tag = str(tag or "").strip()
+    if not tag:
+        yield '<div style="color:red;font-weight:bold;">❌ 请先选择或输入镜像 Tag！</div>', gr.skip(), gr.skip()
+        return
+    if ":" in tag or any(ch.isspace() for ch in tag) or len(tag) > 128:
+        yield ('<div style="color:red;font-weight:bold;">❌ Tag 格式不正确：'
+               '不能包含冒号或空格，长度不能超过 128 个字符</div>'), gr.skip(), gr.skip()
         return
 
     # 解析所选仓库并把镜像地址前缀替换为目标仓库
@@ -1120,7 +1134,8 @@ with gr.Blocks(title="Docker 镜像离线下载工具", fill_width=True) as demo
                                               interactive=False)
                 with gr.Row(elem_id="dp-params-row"):
                     tag_ui = gr.Dropdown(label="Tag", choices=["latest"], value="latest",
-                                         interactive=False, scale=2)
+                                         allow_custom_value=True, interactive=False, scale=2,
+                                         info="可从下拉选择，也可在选中镜像后直接输入自定义 Tag")
                     arch_ui = gr.Dropdown(label="架构 Arch",
                                           choices=["amd64", "arm64", "arm/v7", "s390x", "ppc64le"],
                                           value="amd64", scale=1)

@@ -124,6 +124,17 @@ def test_single_segment_repository_on_non_hub_registry(tmp_path, monkeypatch):
     assert not any("/v2/library/pause/" in url for url in session.requested_urls)
 
 
+def test_download_manager_rejects_empty_or_invalid_tag():
+    """Tag 支持手动输入，但空值与非法字符应在发起请求前拦截。"""
+    empty = next(app.fn_download_manager("nginx", "", "amd64", "ghcr.io",
+                                         "downloads", "无代理", "", "", "", True))
+    assert "Tag" in empty[0]
+
+    invalid = next(app.fn_download_manager("nginx", "v1:bad", "amd64", "ghcr.io",
+                                           "downloads", "无代理", "", "", "", True))
+    assert "Tag 格式不正确" in invalid[0]
+
+
 def test_pull_flow_reports_connectivity_error(tmp_path, monkeypatch):
     import requests
 
